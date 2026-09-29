@@ -60,6 +60,41 @@ def test_stop_runs_shutdown_callback_once() -> None:
     assert shutdowns == [None]
 
 
+@pytest.mark.parametrize("max_concurrency", [1, 2])
+def test_profiler_records_queue_and_compute(
+    monkeypatch: pytest.MonkeyPatch, max_concurrency: int
+) -> None:
+    events: list[tuple[str, str, str | None]] = []
+    monkeypatch.setattr(
+        "sglang_omni.scheduling.simple_scheduler.emit_event",
+        lambda **event: events.append(
+            (event["request_id"], event["event_name"], event["stage"])
+        ),
+    )
+    scheduler = SimpleScheduler(
+        lambda payload: payload, max_concurrency=max_concurrency
+    )
+    scheduler.stage_name = "audiodit"
+    thread = threading.Thread(target=scheduler.start, daemon=True)
+    thread.start()
+    try:
+        for request_id in ("first", "second"):
+            scheduler.enqueue(IncomingMessage(request_id, "new_request", request_id))
+        for _ in range(2):
+            assert scheduler.outbox.get(timeout=2).type == "result"
+    finally:
+        scheduler.stop()
+        thread.join(timeout=2)
+
+    for request_id in ("first", "second"):
+        assert [name for owner, name, _ in events if owner == request_id] == [
+            "scheduler_queue_enter",
+            "scheduler_compute_start",
+            "scheduler_compute_end",
+        ]
+    assert all(stage == "audiodit" for _, _, stage in events)
+
+
 def test_max_concurrency_runs_sync_fn_in_parallel() -> None:
     """Two sync ``compute_fn`` invocations must be in flight simultaneously
     when ``max_concurrency=2``, not serialized."""

@@ -53,6 +53,7 @@ from sglang_omni.proto import (
 from sglang_omni.proto.session import find_session_operation
 from sglang_omni.relay.base import Relay
 from sglang_omni.scheduling.message import IncomingMessage
+from sglang_omni.scheduling.simple_scheduler import SimpleScheduler
 
 TorchProfiler = current_platform.get_torch_profiler()
 
@@ -124,6 +125,10 @@ class Stage:
         self.control_plane = control_plane
         self.input_handler = input_handler or DirectInput()
         self.scheduler = scheduler
+        if isinstance(scheduler, SimpleScheduler):
+            scheduler.stage_name = name
+        else:
+            pass
         self.project_payload = project_payload or {}
         self.stream_targets = stream_targets or []
         self.get_stream_done_targets = get_stream_done_targets
