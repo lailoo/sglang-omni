@@ -17,6 +17,7 @@ import threading
 import time
 from typing import Any, Awaitable, Callable
 
+from sglang_omni.profiler.event_recorder import emit as emit_event
 from sglang_omni.scheduling.message import IncomingMessage, OutgoingMessage
 
 logger = logging.getLogger(__name__)
@@ -47,6 +48,7 @@ class SimpleScheduler:
         self.inbox: _queue_mod.Queue[IncomingMessage] = _queue_mod.Queue()
         self.outbox: _queue_mod.Queue[OutgoingMessage] = _queue_mod.Queue()
         self.requires_tp_work_fanout: bool = True
+        self.stage_name: str | None = None
         self.fn = compute_fn
         self.batch_fn = batch_compute_fn
         self.max_batch_size = max(int(max_batch_size), 1)
@@ -75,6 +77,17 @@ class SimpleScheduler:
         self.abort_lock = threading.Lock()
         self.running = False
         self.pending_messages: collections.deque[IncomingMessage] = collections.deque()
+
+    def enqueue(self, message: IncomingMessage) -> None:
+        if message.type == "new_request":
+            emit_event(
+                request_id=message.request_id,
+                stage=self.stage_name,
+                event_name="scheduler_queue_enter",
+            )
+        else:
+            pass
+        self.inbox.put(message)
 
     def cleanup_aborted_request(self, request_id: str) -> None:
         if self.abort_callback is None:
@@ -197,6 +210,11 @@ class SimpleScheduler:
             return
         else:
             pass
+        emit_event(
+            request_id=msg.request_id,
+            stage=self.stage_name,
+            event_name="scheduler_compute_start",
+        )
         try:
             result = self.fn(msg.data)
             if asyncio.iscoroutine(result):
@@ -209,6 +227,12 @@ class SimpleScheduler:
             else:
                 pass
             raise
+        finally:
+            emit_event(
+                request_id=msg.request_id,
+                stage=self.stage_name,
+                event_name="scheduler_compute_end",
+            )
         if self.consume_if_aborted(msg.request_id):
             return
         else:
@@ -228,11 +252,25 @@ class SimpleScheduler:
             pass
 
         payloads = [msg.data for msg in batch]
-        results = self.batch_fn(payloads)
-        if asyncio.iscoroutine(results):
-            results = loop.run_until_complete(results)
-        else:
-            pass
+        for msg in batch:
+            emit_event(
+                request_id=msg.request_id,
+                stage=self.stage_name,
+                event_name="scheduler_compute_start",
+            )
+        try:
+            results = self.batch_fn(payloads)
+            if asyncio.iscoroutine(results):
+                results = loop.run_until_complete(results)
+            else:
+                pass
+        finally:
+            for msg in batch:
+                emit_event(
+                    request_id=msg.request_id,
+                    stage=self.stage_name,
+                    event_name="scheduler_compute_end",
+                )
         if len(results) != len(batch):
             raise ValueError(
                 f"batch_compute_fn returned {len(results)} results for {len(batch)} requests"
@@ -250,13 +288,25 @@ class SimpleScheduler:
     async def await_result(result: Awaitable[Any]) -> Any:
         return await result
 
-    def run_compute_in_thread(self, payload: Any) -> Any:
-        result = self.fn(payload)
-        if inspect.isawaitable(result):
-            result = asyncio.run(self.await_result(result))
-        else:
-            pass
-        return result
+    def run_compute_in_thread(self, message: IncomingMessage) -> Any:
+        emit_event(
+            request_id=message.request_id,
+            stage=self.stage_name,
+            event_name="scheduler_compute_start",
+        )
+        try:
+            result = self.fn(message.data)
+            if inspect.isawaitable(result):
+                result = asyncio.run(self.await_result(result))
+            else:
+                pass
+            return result
+        finally:
+            emit_event(
+                request_id=message.request_id,
+                stage=self.stage_name,
+                event_name="scheduler_compute_end",
+            )
 
     def start(self) -> None:
         """Run the processing loop (blocks the thread)."""
@@ -339,9 +389,7 @@ class SimpleScheduler:
                 else:
                     pass
                 try:
-                    result = await asyncio.to_thread(
-                        self.run_compute_in_thread, msg.data
-                    )
+                    result = await asyncio.to_thread(self.run_compute_in_thread, msg)
                     if self.consume_if_aborted(msg.request_id):
                         continue
                     else:

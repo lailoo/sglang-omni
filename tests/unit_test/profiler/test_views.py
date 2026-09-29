@@ -125,6 +125,25 @@ def test_stage_breakdown_pairs_open_close(tmp_path: Path) -> None:
     assert row.max_ms == 4.0
 
 
+def test_stage_breakdown_separates_simple_scheduler_queue_and_compute(
+    tmp_path: Path,
+) -> None:
+    events = [
+        make_ev("r1", "audiodit", "stage_input_received", 0),
+        make_ev("r1", "audiodit", "scheduler_queue_enter", 1_000_000),
+        make_ev("r1", "audiodit", "scheduler_compute_start", 4_000_000),
+        make_ev("r1", "audiodit", "scheduler_compute_end", 11_000_000),
+        make_ev("r1", "audiodit", "stage_complete", 13_000_000),
+    ]
+    write_events(tmp_path / "events_audiodit.jsonl", events)
+    rows = stage_breakdown(source=tmp_path)
+    intervals = {row.interval_name: row.total_ms for row in rows}
+
+    assert intervals["scheduler_queue_enter->scheduler_compute_start"] == 3.0
+    assert intervals["scheduler_compute_start->scheduler_compute_end"] == 7.0
+    assert intervals["scheduler_compute_end->stage_complete"] == 2.0
+
+
 def test_stage_breakdown_keeps_intervals_stage_local(tmp_path: Path) -> None:
     """An open on stage A must not pair with a close on stage B."""
     events = [
